@@ -1,0 +1,28 @@
+# ===== ECG Classification Project - Dependencies =====
+
+# Deep learning
+torch>=2.0
+torchvision>=0.15
+
+# Numerical / data
+numpy>=1.24
+pandas>=2.0
+
+# Signal processing (MANDATORY for ECG preprocessing)
+scipy>=1.10
+wfdb>=4.0
+
+# Machine learning metrics
+scikit-learn>=1.2
+
+# Image loading
+Pillow>=9.0
+
+# Configuration
+PyYAML>=6.0
+
+# Progress bars
+tqdm>=4.65
+
+# Visualization (optional, for analysis)
+matplotlib>=3.7
