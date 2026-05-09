@@ -1,0 +1,527 @@
+# =============================================================================
+#              CONFIGURATION PROJET ECG - Classification 5 classes
+# =============================================================================
+# Version: 1.0
+# Date: 2026-02-07
+# Description: Configuration centralisée pour pipeline ECG multi-classes
+# =============================================================================
+
+# Graine aléatoire globale (reproductibilité)
+seed: 42
+
+# =============================================================================
+# CHEMINS DES DONNÉES
+# =============================================================================
+paths:
+  project_root: "."
+  raw_data: "."
+  processed_data: "data/processed"
+  standardized: "data/processed/standardized"
+  reports: "data/reports"
+  logs: "logs"
+  models: "models"
+  
+  # PTB-XL datasets
+  ptbxl_signals: "PTB-XL ECG dataset/ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.1"
+  ptbxl_images: "PTB-XL ECG image (GMC2024)"
+
+# =============================================================================
+# DATASETS
+# =============================================================================
+datasets:
+  ptbxl:
+    name: "PTB-XL"
+    priority: 1
+    preferred_resolution: "records500"  # Préférer 500 Hz
+    fallback_resolution: "records100"
+    metadata_file: "ptbxl_database.csv"
+    scp_file: "scp_statements.csv"
+    
+  chapman:
+    name: "Chapman-Shaoxing"
+    priority: 2
+    
+  ptb_diagnostic:
+    name: "PTB Diagnostic"
+    priority: 3
+    
+  mitbih:
+    name: "MIT-BIH"
+    priority: 4
+    format: "csv"
+
+# =============================================================================
+# PARAMÈTRES DE STANDARDISATION (PHASE 2)
+# =============================================================================
+standardization:
+  # Fréquence d'échantillonnage cible
+  target_fs: 500
+  
+  # Durée cible en secondes
+  target_duration_sec: 10
+  
+  # Nombre de leads requis
+  required_leads: 12
+  
+  # Noms standardisés des leads (ordre)
+  lead_names:
+    - "I"
+    - "II"
+    - "III"
+    - "aVR"
+    - "aVL"
+    - "aVF"
+    - "V1"
+    - "V2"
+    - "V3"
+    - "V4"
+    - "V5"
+    - "V6"
+    
+  # Filtrage
+  filter:
+    type: "bandpass"
+    lowcut: 0.5
+    highcut: 40.0
+    order: 4
+    method: "butterworth"
+    zero_phase: true
+    
+  # Notch filter (powerline)
+  notch:
+    enabled: true
+    adaptive: true  # Détection auto 50/60 Hz
+    frequencies: [50, 60]
+    quality_factor: 30
+    threshold_db: -20  # Seuil de détection artefact powerline
+    
+  # Normalisation
+  normalization:
+    method: "zscore"
+    per_lead: true
+
+  # CWT pour scalogrammes
+  cwt:
+    # [ANCIEN] use_ricker: true
+    wavelet: "morlet"
+
+# =============================================================================
+# CONTRÔLE QUALITÉ (QA)
+# =============================================================================
+qa:
+  # Seuils QA (pass si tous respectés)
+  # Note: Corrélation inter-leads basse car chaque lead voit le cœur différemment
+  thresholds:
+    snr_db_min: 10.0        # Ajusté - 12dB trop strict pour ECG réels
+    corr_mean_min: 0.45     # Ajusté - 0.70 trop strict (leads orthogonaux)
+    saturation_pct_max: 5.0
+    missing_pct_max: 1.0
+    
+  # Escalade si taux de rejet par classe > seuil
+  escalation:
+    class_reject_rate_threshold: 0.10  # 10%
+    
+  # Sauvegarde des rejets pour revue
+  save_rejected_samples: true
+  rejected_samples_dir: "data/reports/rejected_samples"
+
+# =============================================================================
+# NETTOYAGE AVANCÉ DES DONNÉES (DATA CLEANING)
+# =============================================================================
+cleaning:
+  # Seuil de NaN/Inf acceptables (%)
+  nan_threshold_pct: 1.0
+  
+  # Variance minimale pour considérer un signal non-plat
+  flat_variance_threshold: 1.0e-6
+  
+  # Seuil d'outliers en écarts-types (au-delà = clipping)
+  outlier_sigma_threshold: 10.0
+  
+  # Fréquence maximale du baseline wander (Hz)
+  baseline_wander_max_hz: 0.5
+  
+  # Seuil de détection d'artefacts de mouvement
+  motion_artifact_threshold: 5.0
+  
+  # Réparer automatiquement les NaN par interpolation
+  repair_nan: true
+  
+  # Clipper automatiquement les outliers
+  clip_outliers: true
+  
+  # Supprimer les doublons (checksums identiques)
+  remove_duplicates: true
+  
+  # ============================================
+  # DÉBRUITAGE AVANCÉ (Meilleures pratiques ECG)
+  # ============================================
+  
+  # Suppression dérive de base (EMD-style)
+  use_baseline_removal: true
+  
+  # Débruitage par ondelettes (Wavelet Denoising)
+  # Méthode recommandée pour ECG: préserve QRS/ST/T
+  wavelet_denoising:
+    enabled: true
+    wavelet: "db4"  # Options: 'db4', 'db6', 'sym5', 'coif3' (db4 optimal pour ECG)
+    method: "soft"  # 'soft' (shrinkage) ou 'hard' thresholding
+    level: null     # null = auto (basé sur longueur signal)
+
+# =============================================================================
+# SPLITS (Patient-wise pour éviter data leakage)
+# =============================================================================
+split:
+  # Ratios de split
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  
+  # Stratification par classe
+  stratify: true
+
+# =============================================================================
+# CLASSES CIBLES
+# =============================================================================
+classes:
+  names:
+    - "NORM"
+    - "MI"
+    - "STTC"
+    - "CD"
+    - "ARR"
+    
+  # Priorité clinique (multi-label -> single-label)
+  priority:
+    - "MI"
+    - "ARR"
+    - "CD"
+    - "STTC"
+    - "NORM"
+
+# =============================================================================
+# SPLITS (Patient-wise, immuable)
+# =============================================================================
+splits:
+  # Utiliser les splits existants de PTB-XL (strat_fold)
+  use_ptbxl_folds: true
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+  
+  # Alternative si pas de folds
+  ratios:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+# =============================================================================
+# PREVIEWS / VISUALISATION
+# =============================================================================
+visualization:
+  preview_count: 100
+  dpi: 100
+  figsize: [14, 10]
+  
+# =============================================================================
+# LOGGING
+# =============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+
+# =============================================================================
+# PHASE 3: AUGMENTATION (TRAIN UNIQUEMENT)
+# =============================================================================
+augmentation:
+  # Activer/désactiver
+  enabled: true
+  
+  # Multiplicateurs par classe (signaux augmentés par signal original)
+  # OPTIMISÉ: Augmentation massive pour ARR et CD (classes F1 < 0.45)
+  class_multipliers:
+    NORM: 1      # RÉDUIT - éviter surreprésentation
+    MI: 4        # Réduit - classe majoritaire
+    STTC: 10     # AUGMENTÉ - améliorer significativement
+    CD: 12       # DOUBLÉ - F1 très faible, besoin plus de variété
+    ARR: 15      # MAXIMUM - classe la plus difficile, F1 parfois < 0.10
+
+  # Probabilités d'application de chaque transformation
+  probabilities:
+    time_stretch: 0.7
+    time_shift: 0.6
+    elastic_warp: 0.5
+    amplitude_scaling: 0.8
+    st_perturbation: 0.4
+    t_wave_perturbation: 0.4
+    qrs_width_variation: 0.3
+    baseline_wander: 0.6
+    emg_noise: 0.5
+    respiration_noise: 0.4
+    mixup_intraclass: 0.3
+
+  # Paramètres des transformations temporelles
+  temporal:
+    # Time stretch non-linéaire
+    time_stretch:
+      rate_min: 0.9
+      rate_max: 1.1
+      n_segments: 5  # Nombre de segments pour variation locale
+      
+    # Time shift circulaire
+    time_shift:
+      max_shift_ms: 200  # ±200ms
+      
+    # Warping élastique
+    elastic_warp:
+      sigma: 50         # Écart-type du smoothing
+      alpha: 30         # Amplitude de la déformation
+      n_control_points: 4
+
+  # Paramètres amplitude & morphologie
+  morphology:
+    # Scaling amplitude par lead
+    amplitude_scaling:
+      min_scale: 0.85
+      max_scale: 1.15
+      per_lead: true    # Indépendant par lead
+      
+    # Perturbation segment ST
+    st_perturbation:
+      max_shift_mv: 0.15  # ±0.15mV maximum
+      segment_start_ms: 80   # Début ST après pic R
+      segment_end_ms: 200    # Fin ST
+      
+    # Perturbation onde T  
+    t_wave_perturbation:
+      amplitude_scale_min: 0.85
+      amplitude_scale_max: 1.15
+      width_scale_min: 0.9
+      width_scale_max: 1.1
+      
+    # Variation largeur QRS (surtout CD)
+    qrs_width_variation:
+      scale_min: 0.95
+      scale_max: 1.08
+      class_specific:
+        CD: {scale_min: 0.92, scale_max: 1.12}
+
+  # Bruit physiologique réaliste
+  noise:
+    # Baseline wander (respiration, mouvement)
+    baseline_wander:
+      freq_min: 0.15
+      freq_max: 0.5
+      amplitude_std: 0.08  # En unités z-score
+      correlated_leads: true
+      
+    # Bruit EMG (activité musculaire)
+    emg_noise:
+      freq_min: 20
+      freq_max: 50
+      snr_db_min: 20
+      snr_db_max: 35
+      correlated_leads: true
+      correlation_factor: 0.7
+      
+    # Interférence respiratoire
+    respiration_noise:
+      freq_min: 0.12
+      freq_max: 0.4
+      modulation_depth: 0.05
+      correlated_leads: true
+
+  # Mixup intra-classe
+  mixup:
+    enabled: true
+    alpha: 0.4  # Paramètre Beta distribution
+    priority_classes: ["MI", "STTC", "CD"]
+    weight_nonlinear: true  # Pondération non-linéaire
+    
+  # Contrôle qualité post-augmentation
+  qa:
+    check_saturation: false  # Désactivé - re-normalisation + clipping appliqués
+    saturation_threshold: 8.0  # En z-score (non utilisé si check_saturation=false)
+    check_snr: true
+    snr_min_db: 5
+    check_correlation: true
+    corr_min: 0.20
+    check_physiological: true
+    max_rejection_rate: 0.20  # Rejeter si >20% échouent QA
+    
+  # Sorties
+  output:
+    save_dir: "data/augmented"
+    manifest_file: "augmentation_manifest.csv"
+    train_file: "train_augmented.csv"
+    format: "npy"
+    include_originals: true  # Inclure originaux dans train_augmented
+
+# =============================================================================
+# PHASE 4: ENTRAÎNEMENT MODÈLE
+# =============================================================================
+training:
+  # Données
+  data:
+    train_csv: "data/augmented/train_augmented.csv"
+    standardized_dir: "data/processed/standardized"
+    augmented_dir: "data/augmented"
+    
+  # Architecture CNN + Transformer
+  model:
+    name: "ECG_CNN_Transformer"
+    input_shape: [5000, 12]  # (samples, leads)
+    num_classes: 5
+    
+    # Backbone CNN
+    cnn:
+      channels: [32, 64, 128, 256]
+      kernels: [7, 5, 5, 3]
+      strides: [2, 2, 2, 2]
+      dropout_rates: [0.1, 0.15, 0.2, 0.25]
+      use_se_block: true  # Squeeze-and-Excitation
+      activation: "gelu"
+      
+    # Transformer encoder
+    transformer:
+      enabled: true
+      num_layers: 2
+      num_heads: 8
+      dim_feedforward: 512
+      dropout: 0.1
+      
+    # Classification head
+    classifier:
+      hidden_dims: [256, 128]
+      dropout: 0.3
+      
+  # Hyperparamètres d'entraînement
+  hyperparams:
+    batch_size: 32  # Ajuster selon VRAM/RAM
+    epochs: 100     # Early stopping avant si convergence
+    # [ANCIEN] learning_rate: 0.001
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
+    
+    # Optimizer
+    optimizer: "adamw"
+    
+    # Scheduler
+    scheduler: "onecycle"  # "cosine_annealing" ou "onecycle" (plus rapide)
+    use_onecycle_lr: true  # OneCycleLR pour convergence plus rapide
+    scheduler_params:
+      T_max: 100
+      eta_min: 0.00001
+      
+    # MixUp Regularization (améliore généralisation)
+    use_mixup: false
+    mixup_alpha: 0.4  # Paramètre Beta distribution
+      
+    # Loss
+    loss: "class_balanced"  # "cross_entropy", "focal", ou "class_balanced" (meilleur)
+    focal_gamma: 3.0  # AUGMENTÉ: Focus plus fort sur exemples difficiles (ARR, CD)
+    focal_alpha: null  # null = auto-calculé depuis distribution
+    label_smoothing: 0.15  # AUGMENTÉ: Meilleure généralisation
+    cb_beta: 0.9999  # Beta pour Class-Balanced Loss (CVPR 2019)
+    
+    # Class weights (auto-calculés si null)
+    class_weights: null
+    
+    # Boost pour classes minoritaires (multiplie le poids calculé)
+    # OPTIMISÉ: Boost agressif pour ARR et CD qui ont F1 < 0.45
+    class_weight_boost:
+      NORM: 1.0   # Pas de boost
+      MI: 1.0
+      STTC: 1.5   # Boost modéré
+      CD: 2.0     # Boost modéré
+      ARR: 3.0    # Boost modéré
+    
+    # Rééquilibrage par suréchantillonnage
+    use_weighted_sampler: true  # WeightedRandomSampler au lieu de shuffle
+    
+    # Early stopping
+    early_stopping:
+      enabled: true
+      patience: 25  # AUGMENTÉ: Plus de temps pour convergence sur CPU
+      metric: "f1_macro"
+      mode: "max"
+      min_delta: 0.002  # AUGMENTÉ: Éviter faux positifs sur bruit
+      
+    # Gradient clipping
+    gradient_clip: 1.0
+    
+    # Mixed precision (si GPU disponible)
+    mixed_precision: false
+    
+  # Checkpointing
+  checkpoints:
+    save_dir: "models/checkpoints"
+    save_best: true
+    save_last: true
+    save_every_n_epochs: 10
+    
+  # Logging
+  logging:
+    tensorboard: true
+    tensorboard_dir: "logs/tensorboard"
+    log_every_n_steps: 50
+    
+  # Évaluation
+  evaluation:
+    compute_confusion_matrix: true
+    compute_calibration: true  # ECE, Brier score
+    compute_per_class_metrics: true
+    save_predictions: true
+    
+  # Interprétabilité
+  interpretability:
+    grad_cam: true
+    attention_maps: true
+    num_samples: 20  # Nombre d'exemples à visualiser
+    
+  # Export
+  export:
+    onnx: true
+    onnx_path: "models/ecg_classifier.onnx"
+
+# =============================================================================
+# PHASE 5: MODÈLE DUAL-BRANCH (SIGNAL + IMAGE)
+# =============================================================================
+dual_model:
+  enabled: true
+  
+  # Architecture
+  architecture:
+    signal_branch:
+      type: "cnn_1d"
+      output_features: 256
+    
+    image_branch:
+      type: "efficientnet_b0"
+      pretrained: true
+      output_features: 256
+    
+    fusion:
+      type: "attention"  # "concat" ou "attention"
+      use_attention: true
+  
+  # Données
+  data:
+    signal_dir: "data/processed/standardized"
+    image_dir: "PTB-XL ECG image (GMC2024)"
+    image_size: [224, 224]
+    
+  # Hyperparamètres
+  hyperparams:
+    batch_size: 16  # Plus petit car images + signaux
+    epochs: 50
+    learning_rate: 0.0005
+    weight_decay: 0.01
+    
+  # Augmentation images
+  image_augmentation:
+    enabled: true
+    random_rotation: 5
+    random_brightness: 0.1
+    random_contrast: 0.1

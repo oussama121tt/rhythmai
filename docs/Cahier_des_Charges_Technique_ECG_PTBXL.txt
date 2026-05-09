@@ -1,0 +1,105 @@
+Cahier des Charges Technique : Système de classification ECG multimodale PTB-XL
+SECTION 1 — Présentation Générale et Objectifs du Projet
+§ Mission et Contexte
+Le système a pour objectif de classer automatiquement des ECG 12 dérivations du PTB-XL en 5 classes cliniques (NORM, MI, STTC, CD, ARR) dans un cadre multi-label. Le domaine applicatif est l’IA médicale pour l’aide au tri, à la détection d’anomalies et à la priorisation des examens. Les parties prenantes visées sont les cardiologues, les médecins de garde, les ingénieurs IA et les équipes MLOps. Les priorités techniques et cliniques sont la sensibilité sur les classes critiques, la robustesse au bruit, la reproductibilité des splits patient-wise, et une latence compatible avec un usage opérationnel (sources : README.md; PROJECT_DESCRIPTION.md; common/utils.py; pipeline_fusion/train.py).
+La base logicielle contient trois pipelines complémentaires: signaux 1D, images scalogrammes 2D et fusion multimodale. Le livrable principal du projet est cependant la fusion signal-image avec métadonnées, car elle exploite conjointement les informations temporelles, fréquentielles et contextuelles du signal ECG (sources : PROJECT_DESCRIPTION.md; pipeline_fusion/model.py; pipeline_fusion/dataset.py).
+§ Livrables Attendus
+MVP / Application de Base : pipeline d’inférence sur ECG PTB-XL, chargement du signal 12 leads, prétraitement, génération de scalogramme, fusion multimodale, sortie multi-label et sauvegarde du meilleur checkpoint. (sources : pipeline_fusion/train.py; pipeline_fusion/dataset.py; pipeline_fusion/model.py)
+Version Avancée Industrialisée :
+API d’inférence versionnée, journalisation structurée, export ONNX, conteneurisation, monitoring de dérive, et interface clinique ou d’exploration des prédictions.
+Mécanismes complémentaires de calibration, seuils de rejet, interprétabilité et traçabilité des décisions.
+SECTION 2 — Spécifications de l’Application de Base (Baseline)
+§ Collecte et Sources de Données
+Le jeu de données principal est PTB-XL, issu de PhysioNet, composé d’environ 21 799 enregistrements ECG 12 dérivations, acquis sur 10 secondes à 500 Hz. Le code charge les métadonnées du CSV PTB-XL, vérifie l’existence des fichiers WFDB, et reconstruit les étiquettes à partir des codes SCP. La modalité image n’est pas importée d’un corpus externe dans le pipeline de fusion: elle est dérivée à la volée du signal brut sous forme de scalogramme CWT 3 canaux. Le dépôt conserve des chemins compatibles avec un dossier d’images, mais la logique effective du code fonctionne à partir des signaux PTB-XL eux-mêmes (sources : README.md; config.yaml; pipeline_fusion/dataset.py; pipeline_images/dataset.py; pipeline_signals/dataset.py; common/time_frequency.py).
+Modalités supportées: signal ECG 1D brut, image 2D de type scalogramme temps-fréquence, et métadonnées tabulaires réduites (âge normalisé, sexe binaire). (sources : common/utils.py; pipeline_fusion/dataset.py; pipeline_images/dataset.py)
+§ Prétraitement des Données
+Redimensionnement / normalisation temporelle: chaque signal est paddé ou tronqué à 5 000 échantillons par dérivation, soit 10 secondes à 500 Hz. Le scalogramme est ensuite redimensionné en 300 × 300 pour la branche image. (sources : common/utils.py; pipeline_fusion/dataset.py; common/time_frequency.py)
+Normalisation des valeurs: filtrage passe-haut 1 Hz d’ordre 4 puis notch 50 Hz avec Q=30, appliqués en zéro phase via filtfilt; ensuite z-score par lead sur le signal 1D. Le scalogramme est ramené dans [0, 1] après log1p et normalisation min-max. (sources : common/preprocessing.py; pipeline_fusion/dataset.py; common/time_frequency.py)
+Étiquetage / encodage des classes: les codes SCP sont mappés vers les 5 classes NORM, MI, STTC, CD, ARR via SCP_TO_CLASS, puis encodés en vecteur multi-label binaire de taille 5 dans l’ordre [NORM, MI, STTC, CD, ARR]. Le code conserve aussi un label unique de priorité clinique pour compatibilité. (sources : common/utils.py)
+SECTION 3 — Architecture Technique du Modèle de Base
+§ Tableau des couches (OBLIGATOIRE)
+Modèle baseline retenu: ECGFusionModel, c’est-à-dire la fusion multimodale signal + image + métadonnées. Les shapes ci-dessous sont celles du flux nominal utilisé par le code; lorsque la longueur spatiale dépend du backbone convolutionnel, elle est notée de manière explicite. (sources : pipeline_fusion/model.py; common/signal_backbone.py; common/image_backbone.py; common/blocks.py)
+Configuration de compilation et sortie
+Optimiseur: AdamW avec lr=3e-4 et weight_decay=1e-4. Justification: convergence stable sur un problème multi-label déséquilibré, avec régularisation implicite du poids décorrélée du gradient. (sources : pipeline_fusion/trainer.py; pipeline_fusion/train.py)
+Fonction de perte: en configuration de référence, BCEWithLogitsLoss pondérée par classe, avec poids pos_weight = sqrt((total - pos_counts) / pos_counts) puis clipping dans [1, 8]. Le code supporte aussi MultiLabelLogitAdjustedBCE si loss_type=logit_adj. Justification: compenser la rareté des classes minoritaires sans suramplification excessive. (sources : pipeline_fusion/trainer.py; common/losses.py; models/checkpoints/final_results.json)
+Format de sortie: 5 logits indépendants, convertis en probabilités par sigmoid puis en vecteur binaire par seuil 0.5. Le modèle n’utilise pas d’argmax global car la tâche est multi-label. (sources : pipeline_fusion/model.py; pipeline_fusion/trainer.py)
+Note technique: les entrées manquantes ou défaillantes sont repliées en tenseurs nuls dans les datasets; la fusion exploite un masque de modalité et un dropout de modalité p=0.15. La détection d’anomalies/rejet explicite n’est pas implémentée et reste à définir. (sources : pipeline_fusion/dataset.py; pipeline_fusion/model.py)
+§ Augmentation de Données
+Bruit gaussien sur le signal avec probabilité 0.5.
+Scaling aléatoire d’amplitude avec probabilité 0.3.
+Baseline wander synthétique basse fréquence avec probabilité 0.3.
+Masquage aléatoire de 1 à 2 leads avec probabilité 0.2.
+Masquage temporel d’un segment avec probabilité 0.2.
+Dans le pipeline image dédié, la branche scalogramme peut aussi recevoir un flip horizontal et un bruit léger; cette augmentation n’est pas la transformation principale du pipeline de fusion courant. (sources : pipeline_fusion/dataset.py; pipeline_images/dataset.py)
+SECTION 3 bis — Analyse Clinique / Métier et Interprétabilité
+§ Classification par Stades / Classes et Corrélation Métier
+Le mapping métier du projet suit les 5 classes PTB-XL codées dans common/utils.py. La lecture clinique ci-dessous sert de grille de corrélation métier pour l’expert, sans prétendre remplacer une validation cardiologique. (sources : common/utils.py; PROJECT_DESCRIPTION.md)
+§ Aide au Diagnostic / Explicabilité (XAI)
+Méthode XAI utilisée: aucune méthode XAI explicite n’est implémentée dans le code actuel. À définir. Recommandation standard: Grad-CAM sur les scalogrammes, Integrated Gradients ou attention maps sur le signal, et SHAP sur les métadonnées si une justification tabulaire est requise.
+Sortie attendue: cartes de chaleur sur l’image, scores d’importance par lead ou par segment temporel, et éventuellement attribution par variable d’âge / sexe.
+Rôle métier: permettre au cardiologue ou à l’ingénieur clinique de vérifier si la prédiction s’appuie sur des zones physiologiquement pertinentes, de détecter les biais de corrélation, et de documenter les cas ambigus ou discordants.
+SECTION 4 — Extensions Avancées
+Chaque extension ci-dessous est formulée à partir de la logique réellement présente dans le dépôt, ou signalée comme recommandation standard lorsque l’implémentation n’existe pas encore. (sources : pipeline_fusion/trainer.py; common/losses.py; common/image_backbone.py; pipeline_fusion/model.py)
+❖ Gestion du Déséquilibre des Classes
+Technique utilisée: pondération de classe dérivée des fréquences d’apprentissage, avec pos_weight = sqrt((total - pos_counts) / pos_counts) puis clipping à [1, 8], complétée par une variante Logit-Adjusted BCE lorsque loss_type=logit_adj. Cette stratégie est cohérente avec le caractère multi-label et la forte asymétrie de fréquence entre NORM et ARR/CD. (sources : pipeline_fusion/trainer.py; common/losses.py; models/checkpoints/final_results.json)
+❖ Stratégie de Transfer Learning
+Backbone pré-entraîné: EfficientNet-B3 pour la branche image, initialisé avec les poids ImageNet. La branche signal ECGResNet1D est définie de manière spécifique au domaine ECG et est entraînée sans poids pré-entraînés explicites. La stratégie réellement codée correspond à un fine-tuning end-to-end du backbone image. Recommandation standard si une industrialisation supplémentaire est visée: phase 1 gel partiel du backbone image, phase 2 dégel progressif et ajustement fin des blocs profonds. (sources : common/image_backbone.py; common/signal_backbone.py; pipeline_fusion/train.py)
+❖ Métriques de Fiabilité Clinique / Technique
+✓ F1-macro test : cible >= 0.75, avec référence checkpoint à 0.7517. Justification: mesure agrégée de la qualité multi-classe en présence de déséquilibre. (sources : models/checkpoints/final_results.json)
+✓ Sensibilité MI : cible >= 0.80. Justification: priorité clinique forte pour une classe critique d’infarctus; objectif de rappel élevé même au prix d’un léger surcoût de faux positifs. (sources : pipeline_fusion/train.py)
+✓ Sensibilité ARR : cible >= 0.80. Justification: éviter les faux négatifs sur les arythmies potentiellement urgentes. (sources : pipeline_fusion/train.py)
+✓ F1 CD : cible >= 0.60. Justification: la classe CD est minoritaire et difficile; le code la suit explicitement comme KPI métier. (sources : pipeline_fusion/train.py)
+✓ PR-AUC macro : cible >= 0.82. Justification: métrique plus informative que l’accuracy seule en contexte déséquilibré; le checkpoint référent atteint 0.8195. (sources : models/checkpoints/final_results.json)
+❖ Détection d’Anomalies et Décision
+Mécanisme utilisé: seuil sigmoïde 0.5 sur chaque classe, sans réjecteur explicite ni auto-encodeur d’anomalie. Comportement attendu sur cas atypiques: sortie multi-label à faible confiance ou combinatoire, avec possibilité d’ajouter ultérieurement un seuil de rejet global, une calibration par température, ou une règle de discordance inter-modale. À ce stade, ce bloc est à définir si un mode “abstention” clinique est requis. (sources : pipeline_fusion/model.py; pipeline_fusion/trainer.py)
+SECTION 5 — Architecture de Déploiement et MLOps
+§ Industrialisation avec API
+À définir dans le dépôt actuel. Recommandation technique standard: FastAPI pour l’inférence synchrone, avec schémas Pydantic, documentation OpenAPI automatique, et points d’entrée dédiés à l’exécution signal seul, image seule et fusion. FastAPI est préférable ici pour sa faible surcharge, sa compatibilité avec les appels asynchrones et sa lisibilité côté intégration. (sources : aucun module API dédié identifié dans le dépôt actuel)
+§ Conteneurisation et Portabilité
+À définir dans le dépôt actuel. Recommandation standard: Docker pour figer l’environnement Python, les dépendances PyTorch, les chemins de modèles et les données de référence; Kubernetes uniquement si l’on vise un service multi-instance ou un déploiement horizontal. Le bénéfice principal est la reproductibilité de l’inférence et de la réentraînement. (sources : requirements.txt; pipeline_fusion/train.py)
+§ Interface et Intégration Écosystème
+Dashboard / interface utilisateur: à définir; recommandation standard Streamlit ou Gradio pour la revue rapide des prédictions, des probabilités et des cartes d’explicabilité.
+Standard d’interopérabilité: REST pour les échanges applicatifs; HL7/FHIR recommandé pour l’intégration au SI hospitalier; DICOM uniquement si l’on exporte des vues image ou des rapports visuels compatibles, ce qui n’est pas le cas natif ici.
+SECTION 6 — Critères d’Évaluation et Validation (KPIs)
+Accuracy test : cible >= 79 % (référence checkpoint: 79.4 %).
+F1-macro test : cible >= 75 % (référence checkpoint: 75.2 %).
+PR-AUC macro : cible >= 82 % (référence checkpoint: 81.95 %).
+Sensibilité MI : cible >= 80 % conformément à l’objectif métier codé dans l’entraînement.
+§ Conclusion
+Le système constitue une chaîne de décision complète entre recherche Deep Learning et ingénierie logicielle appliquée à l’ECG: il combine un backbone signal spécialisé, une branche image fondée sur EfficientNet-B3, une co-attention croisée, une fusion hiérarchique et un entraînement explicitement adapté au déséquilibre des classes. Le positionnement opérationnel est crédible pour une intégration clinique ou industrielle progressive, à condition d’ajouter les couches d’API, de conteneurisation, de calibration et d’explicabilité attendues dans une mise en production réglementée. (sources : common/signal_backbone.py; common/image_backbone.py; common/blocks.py; pipeline_fusion/model.py; pipeline_fusion/trainer.py; models/checkpoints/final_results.json)
+
+Type de Couche | Paramètres et Output Shape | Fonction / Activation
+Input signal | (B, 12, 5000) | Entrée ECG brute 12 leads.
+Stem 1D | Conv1d 12→64, k=15, s=2, p=7 + BatchNorm1d + ReLU + MaxPool1d k=3 s=2 p=1 -> (B, 64, 1250) | Extraction locale des morphologies ECG.
+LeadWiseAttention | Canal 64 -> 64, attention de type canal -> (B, 64, 1250) | Pondération dynamique des leads (Sigmoid).
+ResBlock1D x2 | 64→64, k=7, stride=1 -> (B, 64, 1250) | Résidus + SEBlock1D + ReLU.
+ResBlock1D x2 | 64→128, k=7, stride=2 -> (B, 128, 625) | Réduction temporelle et augmentation de capacité.
+ResBlock1D x2 | 128→256, k=11, stride=2 -> (B, 256, 313) | Capture de dépendances intermédiaires.
+ResBlock1D x2 | 256→512, k=15, stride=2 -> (B, 512, 157) | Champ réceptif élargi pour le rythme.
+Temporal tokens | Permute -> (B, 157, 512) + positional encoding (max_tokens=256) + TemporalTransformerEncoder (1 couche, 8 têtes, FFN=1024) -> (B, 157, 512) | Modélisation des dépendances longues (GELU, norm_first).
+AttentionPool1D | 512 canaux -> (B, 512) | Pooling pondéré par attention sur la séquence.
+AvgPool1D | AdaptiveAvgPool1d(1) -> (B, 512) | Agrégation globale complémentaire.
+Concat signal | Concat(AttentionPool, AvgPool) -> (B, 1024) | Fusion des deux résumés temporels.
+FC signal | Linear 1024→256 + BatchNorm1d + ReLU -> (B, 256) | Embedding signal final.
+Input image | (B, 3, 300, 300) | Scalogramme CWT 3 canaux.
+EfficientNet-B3 backbone | Weights IMAGENET1K_V1, features conv + MBConv + pooling -> feature map (B, 1536, H, W), puis vector pooled (B, 1536) | Extraction visuelle hiérarchique.
+Head image | Linear 1536→768→256 + BatchNorm1d + ReLU + Dropout(0.3) -> (B, 256) | Projection image vers l’espace de fusion.
+Flatten image tokens | forward_features -> flatten(2).transpose(1, 2) -> (B, N_img, 1536) | Séquence spatiale pour co-attention.
+CoAttention signal→image | Linear projections 512/1536→256, MultiheadAttention 8 têtes -> (B, L_sig, 256) et (B, N_img, 256) | Alignement croisé des modalités.
+Context projection | Mean pooling + Linear/LayerNorm/GELU -> (B, 256) + (B, 256) | Résumé contextuel signal et image.
+Intermediate fusion | Concat(2 × 256) -> Linear 512→256 + LayerNorm + GELU + Dropout -> (B, 256) | Fusion intermédiaire.
+Metadata encoder | 3→16→16 + ReLU -> (B, 16) | Injection âge + sexe.
+Global fusion | Concat(intermediate, signal_global, image_global, metadata) -> 784 -> Linear 784→512→256 + LayerNorm + GELU + Dropout -> (B, 256) | Fusion hiérarchique finale.
+Fusion head | Linear 256→256 + BatchNorm1d + ReLU + Dropout + Linear 256→5 -> logits (B, 5) | Sortie multi-label principale.
+Aux head 1D | Linear 256→128→5 -> logits (B, 5) | Supervision auxiliaire de la branche signal.
+Aux head 2D | Linear 256→128→5 -> logits (B, 5) | Supervision auxiliaire de la branche image.
+CD head | Linear 256→64→1 -> logit (B, 1) | Tête spécialisée pour CD.
+MI head | Linear 256→64→1 -> logit (B, 1) | Tête spécialisée pour MI.
+Sortie décision | Sigmoid(logits) puis seuil 0.5 par classe -> vecteur binaire multi-label | Décision clinique sans argmax global.
+
+Classe / Stade | Signes / Caractéristiques Associés | Focus Imagerie / Signal
+NORM | Rythme sinusal sans anomalie majeure, morphologie de base conservée. | Signal: rythme et morphologie de référence. Image: scalogramme régulier, faible contraste pathologique.
+MI | Ondes Q pathologiques, anomalies ST/T, perte de progression R ou signes d’ischémie/infarctus. | Signal: précordiales et dérivations inférieures/latérales. Image: ruptures ou déformations ST-T et QRS.
+STTC | Sus-décalage ou sous-décalage ST, inversion de T, anomalies de repolarisation. | Signal: segment ST et onde T. Image: motifs temps-fréquence localisés sur la repolarisation.
+CD | Troubles de conduction, QRS élargi, blocs de branche, bloc AV ou pré-excitation. | Signal: largeur QRS, synchronisation inter-dérivations, stabilité des fronts. Image: structures larges et persistantes sur les basses fréquences.
+ARR | Irrégularité RR, tachycardie/bradycardie, fibrillation ou tachyarythmie supraventriculaire. | Signal: dynamique temporelle longue, variabilité du rythme. Image: séquences irrégulières et motifs répétés.
